@@ -186,6 +186,15 @@ static void runCustomScript(const char *filename)
 
 VALUE kernelLoadDataInt(const char *filename);
 
+struct Script
+{
+	std::string name;
+	std::string encData;
+	uint32_t unknown;
+
+	std::string decData;
+};
+
 static void runRMXPScripts()
 {
 	const std::string &scriptPack = shState->rtData().config.game.scripts;
@@ -215,15 +224,30 @@ static void runRMXPScripts()
 	std::string decodeBuffer;
 	decodeBuffer.resize(0x1000);
 
+	std::vector<Script> encScripts(scriptCount);
+
 	for (size_t i = 0; i < scriptCount; ++i)
 	{
 		VALUE script = rb_ary_entry(scriptArray, i);
 
 		if (rb_type(script) != RUBY_T_ARRAY)
+		{
 			continue;
+		}
 
-		VALUE scriptName   = rb_ary_entry(script, 1);
-		VALUE scriptString = rb_ary_entry(script, 2);
+		VALUE scriptUnknown = rb_ary_entry(script, 0);
+		VALUE scriptName    = rb_ary_entry(script, 1);
+		VALUE scriptString  = rb_ary_entry(script, 2);
+
+		Script &sc = encScripts[i];
+		sc.name = RSTRING_PTR(scriptName);
+		sc.encData = std::string(RSTRING_PTR(scriptString), RSTRING_LEN(scriptString));
+		sc.unknown = FIX2UINT(scriptUnknown);
+	}
+
+	for (size_t i = 0; i < scriptCount; ++i)
+	{
+		Script &sc = encScripts[i];
 
 		int result = Z_OK;
 		unsigned long bufferLen;
@@ -233,12 +257,12 @@ static void runRMXPScripts()
 			unsigned char *bufferPtr =
 			        reinterpret_cast<unsigned char*>(const_cast<char*>(decodeBuffer.c_str()));
 			const unsigned char *sourcePtr =
-			        reinterpret_cast<const unsigned char*>(RSTRING_PTR(scriptString));
+			        reinterpret_cast<const unsigned char*>(sc.encData.c_str());
 
 			bufferLen = decodeBuffer.length();
 
 			result = uncompress(bufferPtr, &bufferLen,
-			                    sourcePtr, RSTRING_LEN(scriptString));
+			                    sourcePtr, sc.encData.length());
 
 			bufferPtr[bufferLen] = '\0';
 
@@ -253,7 +277,7 @@ static void runRMXPScripts()
 			static char buffer[256];
 			/* FIXME: '%zu' apparently gcc only? */
 			snprintf(buffer, sizeof(buffer), "Error decoding script %zu: '%s'",
-			         i, RSTRING_PTR(scriptName));
+			         i, sc.name.c_str());
 
 			showMsg(buffer);
 
@@ -262,17 +286,17 @@ static void runRMXPScripts()
 
 		/* Store encoding header + the decoded script
 		 * in 'sc.decData' */
-		std::string decData = "#encoding:utf-8\n";
-		size_t hdSize = decData.size();
-		decData.resize(hdSize + bufferLen);
-		memcpy(&decData[hdSize], decodeBuffer.c_str(), bufferLen);
+		sc.decData = "#encoding:utf-8\n";
+		size_t hdSize = sc.decData.size();
+		sc.decData.resize(hdSize + bufferLen);
+		memcpy(&sc.decData[hdSize], decodeBuffer.c_str(), bufferLen);
 
-		ruby_script(RSTRING_PTR(scriptName));
+		ruby_script(sc.name.c_str());
 
 		rb_gc_start();
 
 		/* Execute code */
-		rb_eval_string_protect(decData.c_str(), 0);
+		rb_eval_string_protect(sc.decData.c_str(), 0);
 
 		VALUE exc = rb_gv_get("$!");
 		if (rb_type(exc) != RUBY_T_NIL)
